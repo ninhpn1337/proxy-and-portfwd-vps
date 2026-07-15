@@ -68,8 +68,8 @@ services:
     container_name: proxy-server
     restart: always
     ports:
-      # Ánh xạ cổng 8080 của máy chủ vào cổng 3128 của Proxy
-      - "8080:3128" 
+      # Ánh xạ cổng 8973 của máy chủ vào cổng 3128 của Proxy
+      - "8973:3128" 
     volumes:
       - ./squid.conf:/etc/squid/squid.conf:ro
       - ./squid_passwd:/etc/squid/squid_passwd:ro
