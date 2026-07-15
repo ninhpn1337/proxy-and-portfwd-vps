@@ -2,6 +2,7 @@ Bước 1: Chuẩn bị môi trường
 Bạn cần đảm bảo máy chủ (VPS) hoặc máy tính của bạn đã được cài đặt Docker và Docker Compose.
 
 ```
+sudo apt install docker-compose -y
 sudo apt-get install docker-compose-plugin -y
 ```
 
