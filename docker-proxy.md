@@ -95,7 +95,7 @@ Type: Chọn HTTP.
 
 Host: Điền địa chỉ IP của cái máy chủ/VPS nơi bạn vừa gõ các lệnh cài đặt Docker ở trên (Ví dụ: 14.22.33.44). Nếu bạn cài trực tiếp trên máy tính đang dùng, hãy điền 127.0.0.1.
 
-Port: Điền 8080 (Vì ở Bước 5, chúng ta đã mở port 8080 ra ngoài).
+Port: Điền 8973 (Vì ở Bước 5, chúng ta đã mở port 8080 ra ngoài).
 
 Username: Điền myuser (Đã cấu hình ở Bước 3).
 
