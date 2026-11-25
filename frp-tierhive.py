@@ -53,6 +53,12 @@ def ensure_paramiko():
     return paramiko
 
 
+def default_suffix(value):
+    """In '(mặc định ...)' chỉ khi value có giá trị thật; value rỗng ("" / None)
+    thì bỏ qua để tránh prompt_int/prompt_str cố dùng default rỗng -> crash."""
+    return f" (mặc định {value})" if value else ""
+
+
 def prompt_int(message, default=None):
     while True:
         raw = input(message).strip()
@@ -65,6 +71,14 @@ def prompt_int(message, default=None):
             return int(raw)
         except ValueError:
             print("[-] Vui lòng nhập một số nguyên hợp lệ.")
+
+
+def prompt_str(message):
+    while True:
+        raw = input(message).strip()
+        if raw:
+            return raw
+        print("[-] Giá trị không được để trống, nhập lại.")
 
 
 def prompt_port_pair(message):
@@ -454,13 +468,18 @@ WantedBy=default.target
 def setup_client():
     print("\n=== [2] CẤU HÌNH FRP CLIENT (TRÊN MÁY LOCAL / KALI) ===")
 
-    server_addr = input(f"Nhập IP Public của VPS (mặc định {DEFAULT_VPS['ip']}): ").strip() or DEFAULT_VPS["ip"]
+    server_addr = input(f"Nhập IP Public của VPS{default_suffix(DEFAULT_VPS['ip'])}: ").strip() or DEFAULT_VPS["ip"]
+    while not server_addr:
+        server_addr = prompt_str("Nhập IP Public của VPS: ")
+
     server_port = prompt_int(
-        f"Nhập Control Port public (mặc định {DEFAULT_VPS['control_public_port']}, "
-        "port này KHÔNG đổi, đã cố định từ lúc tạo VPS): ",
-        default=DEFAULT_VPS["control_public_port"],
+        f"Nhập Control Port public{default_suffix(DEFAULT_VPS['control_public_port'])} "
+        "(port này KHÔNG đổi, đã cố định từ lúc tạo VPS): ",
+        default=(DEFAULT_VPS["control_public_port"] or None),
     )
-    token = input(f"Nhập Token bảo mật (mặc định {DEFAULT_VPS['token']}): ").strip() or DEFAULT_VPS["token"]
+    token = input(f"Nhập Token bảo mật{default_suffix(DEFAULT_VPS['token'])}: ").strip() or DEFAULT_VPS["token"]
+    while not token:
+        token = prompt_str("Nhập Token bảo mật: ")
 
     local_port, external_port, internal_port = prompt_service_ports()
 
@@ -539,12 +558,18 @@ def verify_server_tunnel(ssh, internal_port):
 def first_time_pairing():
     print("\n=== [3] THIẾT LẬP LẦN ĐẦU: SERVER + CLIENT TRONG 1 LẦN (CÓ KIỂM TRA KẾT NỐI) ===")
     print("[*] Bước 1/3: Cài & cấu hình FRP Server trên VPS qua SSH.")
-    vps_ip = input(f"Nhập IP VPS (mặc định {DEFAULT_VPS['ip']}): ").strip() or DEFAULT_VPS["ip"]
+    vps_ip = input(f"Nhập IP VPS{default_suffix(DEFAULT_VPS['ip'])}: ").strip() or DEFAULT_VPS["ip"]
+    while not vps_ip:
+        vps_ip = prompt_str("Nhập IP VPS: ")
+
     ssh_port = prompt_int("Nhập Port SSH (mặc định 2277): ", default=2277)
     username = input("Nhập Username SSH (mặc định root): ").strip() or "root"
     password = input("Nhập Mật khẩu SSH: ").strip()
     bind_port = prompt_int("Nhập bindPort NỘI BỘ trên VPS cho control (ví dụ 7000): ", default=7000)
-    token = input(f"Nhập Token bảo mật (mặc định {DEFAULT_VPS['token']}): ").strip() or DEFAULT_VPS["token"]
+
+    token = input(f"Nhập Token bảo mật{default_suffix(DEFAULT_VPS['token'])}: ").strip() or DEFAULT_VPS["token"]
+    while not token:
+        token = prompt_str("Nhập Token bảo mật: ")
 
     try:
         ssh = connect_vps(vps_ip, ssh_port, username, password)
@@ -579,6 +604,138 @@ def first_time_pairing():
         ssh.close()
 
 
+def restart_frpc_after_change(config_dir):
+    """Restart frpc theo đúng cách nó đang chạy (systemd / systemd --user / nohup),
+    dùng cho các thao tác gỡ config để áp dụng thay đổi ngay, không cần chạy lại
+    toàn bộ deploy_client_config()."""
+    is_root = (os.geteuid() == 0) if hasattr(os, "geteuid") else False
+
+    if is_root and os.path.isfile("/etc/systemd/system/frpc.service"):
+        subprocess.run(["systemctl", "restart", "frpc"], check=False)
+        print("[+] Đã restart frpc (systemd).")
+        return
+
+    user_unit = os.path.expanduser("~/.config/systemd/user/frpc.service")
+    if os.path.isfile(user_unit):
+        subprocess.run(["systemctl", "--user", "restart", "frpc"], check=False)
+        print("[+] Đã restart frpc (systemd --user).")
+        return
+
+    bin_dir = "/usr/local/bin" if is_root else os.path.expanduser("~/.local/bin")
+    frpc_path = os.path.join(bin_dir, "frpc")
+    config_path = os.path.join(config_dir, "frpc.toml")
+    if not os.path.isfile(frpc_path):
+        print("[-] Không tìm thấy frpc binary để restart, bạn tự chạy lại thủ công.")
+        return
+
+    subprocess.run(["pkill", "-9", "-f", frpc_path], stderr=subprocess.DEVNULL)
+    log_path = os.path.join(config_dir, "frpc.log")
+    subprocess.Popen(
+        f"nohup {frpc_path} -c {config_path} > {log_path} 2>&1 & disown",
+        shell=True,
+        start_new_session=True,
+    )
+    print(f"[+] Đã restart frpc (nohup), log tại: {log_path}")
+
+
+def remove_one_port():
+    print("\n=== [4] GỠ 1 PORT DỊCH VỤ (KHÔNG MUỐN EXPOSE NỮA) ===")
+    config_dir = client_config_dir()
+    confd_dir = os.path.join(config_dir, "confd")
+
+    if not os.path.isdir(confd_dir):
+        print(f"[-] Không thấy thư mục cấu hình: {confd_dir} (chưa cấu hình port nào trên máy này).")
+        return
+
+    port_files = sorted(f for f in os.listdir(confd_dir) if f.startswith("port-") and f.endswith(".toml"))
+    if not port_files:
+        print("[-] Hiện không có port nào đang cấu hình.")
+        return
+
+    print("[*] Các port đang cấu hình (lấy tên cổng ngoài từ lúc tạo):")
+    for i, f in enumerate(port_files, start=1):
+        print(f"  {i}. {f}")
+
+    raw = input(f"Chọn port cần gỡ (1-{len(port_files)}): ").strip()
+    try:
+        chosen = port_files[int(raw) - 1]
+    except (ValueError, IndexError):
+        print("[-] Lựa chọn không hợp lệ.")
+        return
+
+    confirm = input(f"Xoá '{chosen}' và dừng expose port này? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("[*] Đã hủy, không xoá gì.")
+        return
+
+    os.remove(os.path.join(confd_dir, chosen))
+    print(f"[+] Đã xoá {chosen}.")
+    restart_frpc_after_change(config_dir)
+
+
+def teardown_client():
+    print("\n=== [5] DỪNG & GỠ TOÀN BỘ CLIENT (DÙNG KHI ĐỔI SANG VPS KHÁC) ===")
+    config_dir = client_config_dir()
+    is_root = (os.geteuid() == 0) if hasattr(os, "geteuid") else False
+
+    if is_root and os.path.isfile("/etc/systemd/system/frpc.service"):
+        subprocess.run(["systemctl", "stop", "frpc"], check=False)
+        subprocess.run(["systemctl", "disable", "frpc"], check=False)
+        print("[+] Đã dừng & tắt tự khởi động frpc (systemd).")
+
+    user_unit = os.path.expanduser("~/.config/systemd/user/frpc.service")
+    if os.path.isfile(user_unit):
+        subprocess.run(["systemctl", "--user", "stop", "frpc"], check=False)
+        subprocess.run(["systemctl", "--user", "disable", "frpc"], check=False)
+        print("[+] Đã dừng & tắt tự khởi động frpc (systemd --user).")
+
+    bin_dir = "/usr/local/bin" if is_root else os.path.expanduser("~/.local/bin")
+    frpc_path = os.path.join(bin_dir, "frpc")
+    subprocess.run(["pkill", "-9", "-f", frpc_path], stderr=subprocess.DEVNULL)
+    print("[+] Đã dừng tiến trình frpc (nếu đang chạy nền bằng nohup).")
+
+    confirm = input(f"Xoá luôn thư mục cấu hình {config_dir} (mất hết các port đã lưu)? (y/N): ").strip().lower()
+    if confirm == "y":
+        shutil.rmtree(config_dir, ignore_errors=True)
+        print(f"[+] Đã xoá {config_dir}.")
+    else:
+        print(f"[*] Giữ lại {config_dir}, chỉ dừng service — có thể dùng lại config này sau.")
+
+    print("[+] Client đã dừng. Có thể chạy lại chế độ 2/3 để nối sang VPS khác.")
+
+
+def teardown_server():
+    print("\n=== [6] GỠ FRPS TRÊN VPS (QUA SSH) ===")
+    vps_ip = prompt_str("Nhập IP VPS: ")
+    ssh_port = prompt_int("Nhập Port SSH: ")
+    username = input("Nhập Username SSH (mặc định root): ").strip() or "root"
+    password = input("Nhập Mật khẩu SSH: ").strip()
+
+    try:
+        ssh = connect_vps(vps_ip, ssh_port, username, password)
+    except Exception as e:
+        print(f"[-] Kết nối SSH thất bại: {e}")
+        return
+
+    try:
+        if remote_has_systemd(ssh):
+            run_ssh(ssh, "systemctl stop frps || true")
+            run_ssh(ssh, "systemctl disable frps || true")
+            print("[+] Đã dừng & tắt tự khởi động frps (systemd).")
+        else:
+            run_ssh(ssh, "pkill -9 -f '/usr/local/bin/frps' || true")
+            print("[+] Đã dừng frps (nohup).")
+
+        confirm = input("Xoá luôn binary + config frps trên VPS (/usr/local/bin/frps, /etc/frp)? (y/N): ").strip().lower()
+        if confirm == "y":
+            run_ssh(ssh, "rm -f /usr/local/bin/frps && rm -rf /etc/frp")
+            print("[+] Đã xoá binary + config frps trên VPS.")
+        else:
+            print("[*] Giữ lại binary + config frps trên VPS, chỉ dừng service.")
+    finally:
+        ssh.close()
+
+
 def main():
     print("=========================================")
     print("   QUẢN LÝ & TỰ ĐỘNG HÓA FRP (ONE-FILE)   ")
@@ -586,7 +743,10 @@ def main():
     print("1. Cài đặt & Cấu hình Server (VPS)")
     print("2. Cấu hình Client (Local / Kali)")
     print("3. Thiết lập lần đầu Server + Client (có kiểm tra kết nối)")
-    choice = input("Chọn chế độ (1-3): ").strip()
+    print("4. Gỡ 1 port dịch vụ (không muốn expose nữa)")
+    print("5. Dừng & gỡ toàn bộ Client (đổi sang VPS khác)")
+    print("6. Gỡ frps trên VPS cũ (qua SSH)")
+    choice = input("Chọn chế độ (1-6): ").strip()
 
     if choice == "1":
         setup_server()
@@ -594,6 +754,12 @@ def main():
         setup_client()
     elif choice == "3":
         first_time_pairing()
+    elif choice == "4":
+        remove_one_port()
+    elif choice == "5":
+        teardown_client()
+    elif choice == "6":
+        teardown_server()
     else:
         print("Lựa chọn không hợp lệ!")
 
